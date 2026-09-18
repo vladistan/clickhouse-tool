@@ -1,0 +1,40 @@
+# Example clickhouse-tool configuration.
+#
+# Copy to ./clickhouse-tool.toml (project-local) or
+# ~/.config/clickhouse-tool/config.toml (user-level). Project-local wins
+# on any field present in both.
+
+default_profile = "pilot"      # never "default"
+default_format  = "toon"
+default_window  = "2h"
+default_timezone = "local"     # "local", "UTC", or any IANA zone name
+
+[profiles.pilot]
+host      = "your-clickhouse-host.example.com"
+port      = 9000
+transport = "native"           # "native" | "http", both implemented
+database  = "otel"
+secure    = false
+logs_table = "otel_logs"
+connect_timeout = 10
+query_timeout   = 60
+
+[profiles.pilot.user]
+ssm = "/clickhouse/v1/pilot/tool/username"
+[profiles.pilot.password]
+ssm = "/clickhouse/v1/pilot/tool/password"
+
+[profiles.pilot-http]           # HTTP-transport variant of the same pilot
+host = "your-clickhouse-host.example.com"
+port = 8123
+transport = "http"
+database = "otel"
+secure = false
+logs_table = "otel_logs"
+connect_timeout = 10
+query_timeout = 60
+
+[profiles.pilot-http.user]
+ssm = "/clickhouse/v1/pilot/tool/username"
+[profiles.pilot-http.password]
+ssm = "/clickhouse/v1/pilot/tool/password"
