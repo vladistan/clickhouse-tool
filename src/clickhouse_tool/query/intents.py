@@ -21,6 +21,7 @@ class Filters:
     level: str | None = None
     time_range: str | None = None
     search: str | None = None
+    include_future: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +35,9 @@ class LogsIntent:
     sort: str | None = None
     limit: int | None = None
     tz: str = "UTC"
+    # (SQL expression, alias) pairs appended to the narrow projection for a
+    # formatter's own use; aliases start with "__" and never reach json/toon.
+    hidden: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

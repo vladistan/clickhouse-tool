@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import time
+from pathlib import Path
+
 import pytest
 from typer.testing import CliRunner
 
@@ -61,7 +65,9 @@ def test_query_verb_wraps_sql_and_params_with_no_table_resolution(
     monkeypatch.setattr(query_module.wiring, "load_profile", lambda _p, **_k: ResolvedProfile())
     monkeypatch.setattr(query_module.wiring, "open_client", lambda _p: object())
 
-    def _fake_run_statement(_client: object, statement: SqlStatement, _formatter: object, **kwargs: object) -> None:
+    def _fake_run_statement(
+        _client: object, statement: SqlStatement, _formatter: object, **kwargs: object
+    ) -> None:
         captured["statement"] = statement
         captured["table"] = kwargs.get("table")
 
@@ -78,3 +84,77 @@ def test_query_verb_wraps_sql_and_params_with_no_table_resolution(
     assert statement.sql == "SELECT 1"
     assert statement.params == {"x": "5"}
     assert captured["table"] is None
+
+
+def test_positional_sql_wins_when_stdin_is_dev_null(monkeypatch: pytest.MonkeyPatch) -> None:
+    with Path(os.devnull).open() as devnull:
+        monkeypatch.setattr("sys.stdin", devnull)
+        assert _resolve_sql("SELECT 1") == "SELECT 1"
+
+
+def test_positional_sql_wins_when_stdin_is_an_open_unwritten_pipe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    read_fd, write_fd = os.pipe()
+    with os.fdopen(read_fd) as reader:
+        monkeypatch.setattr("sys.stdin", reader)
+        started = time.monotonic()
+        assert _resolve_sql("SELECT 1") == "SELECT 1"
+        with pytest.raises(ConfigError, match="no SQL given"):
+            _resolve_sql(None)
+        assert time.monotonic() - started < 2
+    os.close(write_fd)
+
+
+def test_non_empty_pipe_with_positional_sql_still_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b"SELECT 2")
+    os.close(write_fd)
+    with os.fdopen(read_fd) as reader:
+        monkeypatch.setattr("sys.stdin", reader)
+        with pytest.raises(ConfigError, match="both"):
+            _resolve_sql("SELECT 1")
+
+
+def test_piped_sql_alone_is_read_from_a_real_pipe(monkeypatch: pytest.MonkeyPatch) -> None:
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b"SELECT 2")
+    os.close(write_fd)
+    with os.fdopen(read_fd) as reader:
+        monkeypatch.setattr("sys.stdin", reader)
+        assert _resolve_sql(None) == "SELECT 2"
+
+
+@pytest.mark.parametrize(
+    ("args", "configured", "expected_zone"),
+    [
+        (["--utc"], "Asia/Tokyo", "UTC"),
+        ([], "Asia/Tokyo", "Asia/Tokyo"),
+    ],
+    ids=["utc-flag", "configured-zone"],
+)
+def test_query_sets_session_timezone(
+    monkeypatch: pytest.MonkeyPatch, args: list[str], configured: str, expected_zone: str
+) -> None:
+    import clickhouse_tool.cli.commands.query as query_module
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        query_module.wiring,
+        "load_profile",
+        lambda _p, **_k: ResolvedProfile(default_timezone=configured),
+    )
+    monkeypatch.setattr(query_module.wiring, "open_client", lambda _p: object())
+    monkeypatch.setattr(
+        query_module,
+        "run_statement",
+        lambda _c, statement, _f, **_k: captured.__setitem__("statement", statement),
+    )
+    monkeypatch.setattr(query_module, "_resolve_sql", lambda sql: sql)
+
+    result = runner.invoke(app, ["query", "SELECT timeZone()", *args])
+
+    assert result.exit_code == 0, result.stdout
+    statement = captured["statement"]
+    assert isinstance(statement, SqlStatement)
+    assert statement.settings == {"session_timezone": expected_zone}

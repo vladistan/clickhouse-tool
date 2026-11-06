@@ -52,21 +52,25 @@ def test_resolved_password_repr_shows_ssm_resolved_not_value() -> None:
 
 
 def test_per_ref_profile_and_region_override_client_construction() -> None:
-    profile = ResolvedProfile(password=SsmRef(ssm="/a/password", aws_profile="other", region="us-west-2"))
+    profile = ResolvedProfile(
+        password=SsmRef(ssm="/a/password", aws_profile="other", region="us-west-2")
+    )
     fake = _FakeSsmClient({"/a/password": "hunter2"})
 
-    fake_session = type(
-        "FakeSession",
-        (),
-        {"client": lambda self, service, **kw: fake},
-    )()
+    seen: dict[str, object] = {}
 
-    with (
-        patch("clickhouse_tool.core.ssm._ssm_client", return_value=_FakeSsmClient({})),
-        patch("boto3.Session", return_value=fake_session),
-    ):
+    class _FakeSession:
+        def __init__(self, profile_name: str | None = None) -> None:
+            seen["profile_name"] = profile_name
+
+        def client(self, service: str, region_name: str | None = None) -> _FakeSsmClient:
+            seen["region_name"] = region_name
+            return fake
+
+    with patch("boto3.Session", _FakeSession):
         result = materialise_secrets(profile)
     assert result.password.get_secret_value() == "hunter2"  # type: ignore[union-attr]
+    assert seen == {"profile_name": "other", "region_name": "us-west-2"}
 
 
 def test_resolves_user_as_plain_string_not_secretstr() -> None:

@@ -66,3 +66,20 @@ def test_format_stream_delegates_to_format_per_block(make_rowset):
     block = make_rowset(["n"], [("only",)])
     lines = list(formatter.format_stream(iter([block])))
     assert json.loads(lines[0]) == [{"n": "only"}]
+
+
+def test_date_decimal_uuid_and_ip_values_serialise_as_strings() -> None:
+    from datetime import date
+    from decimal import Decimal
+    from ipaddress import ip_address
+    from uuid import UUID
+
+    from clickhouse_tool.formatters.json import json_value
+
+    assert json_value(date(2026, 11, 6)) == "2026-11-06"
+    assert json_value(Decimal("1.50")) == "1.50"
+    assert (
+        json_value(UUID("12345678-1234-5678-1234-567812345678"))
+        == "12345678-1234-5678-1234-567812345678"
+    )
+    assert json_value(ip_address("10.0.0.1")) == "10.0.0.1"

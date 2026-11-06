@@ -14,7 +14,7 @@ from clickhouse_tool.cli.commands import config as config_command
 from clickhouse_tool.cli.commands import facets, listing, logs, metrics, query, tables
 from clickhouse_tool.core.errors import ClickhouseToolError
 from clickhouse_tool.core.exit_codes import ExitCode
-from clickhouse_tool.core.monitoring import setup_sentry
+from clickhouse_tool.core.monitoring import report_crash, setup_sentry
 
 # Frees the single-letter flag from typer's default help binding so a verb
 # can use it for --host instead.
@@ -35,10 +35,28 @@ app.command("tables")(tables.tables)
 app.add_typer(metrics.app, name="metrics")
 
 
+def _command_names(typer_app: typer.Typer) -> frozenset[str]:
+    """Every command and sub-app name registered on ``typer_app``, recursively."""
+    names = {command.name for command in typer_app.registered_commands if command.name}
+    for group in typer_app.registered_groups:
+        if group.name:
+            names.add(group.name)
+        if group.typer_instance is not None:
+            names |= _command_names(group.typer_instance)
+    return frozenset(names)
+
+
+_COMMAND_NAMES = _command_names(app)
+# Set to any non-empty value to raise after startup: verifies crash reporting end to end.
+FORCE_CRASH_ENV_VAR = "CLICKHOUSE_TOOL_FORCE_CRASH"
+
+
 def run() -> None:
     """Entry point installed as the ``clickhouse-tool`` console script."""
-    setup_sentry()
+    setup_sentry(commands=_COMMAND_NAMES)
     try:
+        if os.environ.get(FORCE_CRASH_ENV_VAR):
+            raise RuntimeError(f"forced crash: {FORCE_CRASH_ENV_VAR} is set")
         app()
     except ClickhouseToolError as exc:
         typer.echo(f"Error: {exc.message}", err=True)
@@ -50,7 +68,8 @@ def run() -> None:
         raise SystemExit(130) from None
     except SystemExit:
         raise
-    except Exception as exc:  # pragma: no cover -- last-resort funnel
+    except Exception as exc:
+        report_crash(exc)
         typer.echo(f"Error: {exc}", err=True)
         raise SystemExit(int(ExitCode.GENERAL_ERROR)) from None
 

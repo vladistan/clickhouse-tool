@@ -332,7 +332,6 @@ wheels = [
 
 [[package]]
 name = "clickhouse-tool"
-version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },
@@ -365,10 +364,10 @@ native = [
 [package.metadata]
 requires-dist = [
     { name = "boto3", specifier = ">=1.34.0" },
+    { name = "clickhouse-connect", marker = "extra == 'all'", specifier = ">=0.7.0" },
     { name = "clickhouse-connect", marker = "extra == 'http'", specifier = ">=0.7.0" },
+    { name = "clickhouse-driver", marker = "extra == 'all'", specifier = ">=0.2.9" },
     { name = "clickhouse-driver", marker = "extra == 'native'", specifier = ">=0.2.9" },
-    { name = "clickhouse-tool", extras = ["http"], marker = "extra == 'all'" },
-    { name = "clickhouse-tool", extras = ["native"], marker = "extra == 'all'" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.0" },
     { name = "pydantic", specifier = ">=2.5.0" },
@@ -380,7 +379,7 @@ requires-dist = [
     { name = "structlog", specifier = ">=24.0" },
     { name = "typer", specifier = ">=0.12.0" },
 ]
-provides-extras = ["native", "http", "all", "dev"]
+provides-extras = ["all", "dev", "http", "native"]
 
 [[package]]
 name = "colorama"

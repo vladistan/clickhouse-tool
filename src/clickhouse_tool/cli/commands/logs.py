@@ -2,15 +2,28 @@
 
 from __future__ import annotations
 
+import shutil
+import sys
+
 import typer
 
 from clickhouse_tool.cli import wiring
 from clickhouse_tool.cli.runner import run_follow, run_statement
 from clickhouse_tool.core.errors import ConfigError
 from clickhouse_tool.core.logging import setup_logging
+from clickhouse_tool.core.models import RowSet
+from clickhouse_tool.core.schema import INSERTED_AT, NAMESPACE, probe_columns
 from clickhouse_tool.core.timezone import resolve_display_timezone
-from clickhouse_tool.formatters import get_formatter
-from clickhouse_tool.query.builder import build_count, build_initial_cursor, build_latest_cursor, build_logs
+from clickhouse_tool.formatters import Formatter, get_formatter
+from clickhouse_tool.formatters.logline import LayoutOptions, LogLineFormatter
+from clickhouse_tool.query.builder import (
+    build_arrival_start_cursor,
+    build_count,
+    build_initial_cursor,
+    build_latest_cursor,
+    build_logs,
+)
+from clickhouse_tool.query.columns import apply_lag_column, layout_hidden_columns
 from clickhouse_tool.query.intents import CountIntent, Filters, LogsIntent
 
 
@@ -30,9 +43,23 @@ def logs(
     raw: bool = typer.Option(False, "--raw", help="Alias for --full"),
     count: bool = typer.Option(False, "--count", help="Return a row count instead of rows"),
     follow: bool = typer.Option(
-        False, "--follow", help="Poll continuously for new rows, oldest first (Ctrl-C to stop)"
+        False, "--follow", help="Poll continuously for new rows as they arrive (Ctrl-C to stop)"
+    ),
+    by_event_time: bool = typer.Option(
+        False, "--by-event-time", help="With --follow: order by event time instead of arrival"
     ),
     utc: bool = typer.Option(False, "--utc", help="Show timestamps in UTC instead of local time"),
+    interval: float = typer.Option(2.0, "--interval", help="Seconds between --follow polls"),
+    wrap: bool = typer.Option(False, "--wrap", help="Table on a terminal: wrap long messages"),
+    no_glyphs: bool = typer.Option(
+        False, "--no-glyphs", help="Table on a terminal: words, not glyphs"
+    ),
+    full_timestamps: bool = typer.Option(
+        False, "--full-timestamps", help="Table on a terminal: always show the date"
+    ),
+    include_future: bool = typer.Option(
+        False, "--include-future", help="Also show rows stamped later than now()"
+    ),
     limit: int | None = typer.Option(None, "-n", "--limit", help="Maximum rows returned"),
     output_format: str | None = typer.Option(None, "-f", "--format", help="Output format"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
@@ -43,6 +70,8 @@ def logs(
         raise ConfigError("--follow does not support --count")
     if follow and sort is not None:
         raise ConfigError("--follow always orders oldest-first and does not support --sort")
+    if interval <= 0:
+        raise ConfigError("--interval must be a positive number of seconds")
     resolved = wiring.load_profile(profile)
     table = wiring.resolve_logs_table(resolved)
     window = time_range if time_range is not None else resolved.default_window
@@ -54,19 +83,73 @@ def logs(
         level=level,
         time_range=window,
         search=search,
+        include_future=include_future,
     )
     tz = resolve_display_timezone(utc=utc, configured=resolved.default_timezone)
-    intent = LogsIntent(filters=filters, full=full, raw=raw, sort=sort, limit=limit, tz=tz)
-    formatter = get_formatter(output_format or resolved.default_format, follow=follow)
+    format_name = output_format or resolved.default_format
+    line_layout = format_name == "table" and not (full or raw or count)
     client = wiring.open_client(resolved)
-    if follow:
-        latest = client.execute(build_latest_cursor(intent, table))
-        since = latest.rows[0][0] if latest.rows else client.execute(build_initial_cursor(window)).rows[0][0]
-        run_follow(client, intent=intent, table=table, formatter=formatter, since=since)
-        return
-    statement = (
-        build_count(CountIntent.from_logs_intent(intent), table)
-        if count
-        else build_logs(intent, table)
+    table_columns = probe_columns(client, table)
+    has_inserted_at = INSERTED_AT in table_columns
+    hidden = layout_hidden_columns(NAMESPACE in table_columns) if line_layout else ()
+    intent = LogsIntent(
+        filters=filters, full=full, raw=raw, sort=sort, limit=limit, tz=tz, hidden=hidden
     )
-    run_statement(client, statement, formatter, table=table)
+    formatter: Formatter
+    if line_layout:
+        terminal = sys.stdout.isatty()
+        formatter = LogLineFormatter(
+            LayoutOptions(
+                terminal=terminal,
+                follow=follow,
+                tz=tz,
+                widths=resolved.layout.widths,
+                terminal_width=shutil.get_terminal_size(fallback=(200, 24)).columns,
+                glyphs=not no_glyphs,
+                wrap=wrap,
+                full_timestamps=full_timestamps,
+            )
+        )
+    else:
+        formatter = get_formatter(format_name, follow=follow)
+
+    def flag_lag(rows: RowSet) -> RowSet:
+        return apply_lag_column(rows, resolved.late_after_s, resolved.future_after_s)
+
+    if follow:
+        arrival = has_inserted_at and not by_event_time
+        if arrival:
+            start = client.execute(build_arrival_start_cursor()).rows[0]
+            since: str | tuple[str, str] = (str(start[0]), str(start[1]))
+        else:
+            if not by_event_time:
+                typer.echo(
+                    f"note: {table} has no {INSERTED_AT} column; following by event time, "
+                    "late rows may be skipped",
+                    err=True,
+                )
+            latest = client.execute(build_latest_cursor(intent, table))
+            since = (
+                str(latest.rows[0][0])
+                if latest.rows
+                else str(client.execute(build_initial_cursor(window)).rows[0][0])
+            )
+        run_follow(
+            client,
+            intent=intent,
+            table=table,
+            formatter=formatter,
+            since=since,
+            poll_interval=interval,
+            arrival=arrival,
+            has_inserted_at=has_inserted_at,
+            row_transform=flag_lag,
+        )
+        return
+    if count:
+        run_statement(
+            client, build_count(CountIntent.from_logs_intent(intent), table), formatter, table=table
+        )
+        return
+    statement = build_logs(intent, table, has_inserted_at)
+    run_statement(client, statement, formatter, table=table, row_transform=flag_lag)

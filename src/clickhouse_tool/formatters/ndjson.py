@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from typing import ClassVar
 
 from clickhouse_tool.core.models import RowSet
-from clickhouse_tool.formatters.json import json_value
+from clickhouse_tool.formatters.json import json_record
 
 
 class NdjsonFormatter:
@@ -23,8 +23,7 @@ class NdjsonFormatter:
     def format(self, rows: RowSet) -> Iterator[str]:
         names = [column.name for column in rows.columns]
         for row in rows.rows:
-            record = {name: json_value(value) for name, value in zip(names, row, strict=True)}
-            yield json.dumps(record)
+            yield json.dumps(json_record(names, row))
 
     def format_stream(self, blocks: Iterator[RowSet]) -> Iterator[str]:
         for block in blocks:

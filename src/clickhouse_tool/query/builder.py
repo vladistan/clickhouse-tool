@@ -11,7 +11,13 @@ from dataclasses import replace
 
 from clickhouse_tool.core.errors import ConfigError
 from clickhouse_tool.core.models import SqlStatement
-from clickhouse_tool.query.columns import COLUMN_MAP, DEFAULT_LOG_COLS, validate_columns
+from clickhouse_tool.query.columns import (
+    COLUMN_MAP,
+    DEFAULT_LOG_COLS,
+    LAG_COLUMN,
+    lag_expression,
+    validate_columns,
+)
 from clickhouse_tool.query.intents import (
     CountIntent,
     FacetIntent,
@@ -43,7 +49,9 @@ from clickhouse_tool.query.timerange import parse_time_range
 _DEFAULT_ROW_LIMIT = 20
 
 
-def _assemble_predicates(filters: Filters) -> tuple[list[str], dict[str, object], dict[str, object]]:
+def _assemble_predicates(
+    filters: Filters,
+) -> tuple[list[str], dict[str, object], dict[str, object]]:
     clauses: list[str] = []
     params: dict[str, object] = {}
     meta: dict[str, object] = {}
@@ -70,7 +78,7 @@ def _assemble_predicates(filters: Filters) -> tuple[list[str], dict[str, object]
         clauses.append(predicate.sql)
         params.update(predicate.params)
     if filters.time_range is not None:
-        predicate = time_predicate(filters.time_range)
+        predicate = time_predicate(filters.time_range, upper_bound=not filters.include_future)
         clauses.append(predicate.sql)
         params.update(predicate.params)
     if filters.search is not None:
@@ -95,11 +103,32 @@ def _projection(columns: tuple[str, ...] | None, full: bool, raw: bool) -> str:
     return ", ".join(f"{COLUMN_MAP[name]} AS {name}" for name in names)
 
 
-def build_logs(intent: LogsIntent, table: str) -> SqlStatement:
+def _narrow_meta(intent: LogsIntent, *hidden: str) -> tuple[str, ...]:
+    return (*validate_columns(intent.columns or DEFAULT_LOG_COLS), *hidden)
+
+
+def _hidden_projection(intent: LogsIntent) -> tuple[str, tuple[str, ...]]:
+    """SQL suffix and aliases for the intent's hidden layout columns."""
+    if not intent.hidden:
+        return "", ()
+    suffix = "".join(f", {expr} AS {alias}" for expr, alias in intent.hidden)
+    return suffix, tuple(alias for _expr, alias in intent.hidden)
+
+
+def build_logs(intent: LogsIntent, table: str, has_inserted_at: bool | None = None) -> SqlStatement:
+    """Page of log rows. ``has_inserted_at`` adds the hidden lag column (narrow only)."""
     clauses, params, meta = _assemble_predicates(intent.filters)
     projection = _projection(intent.columns, intent.full, intent.raw)
     sort_sql = canonicalise_sort(intent.sort)
     limit = intent.limit if intent.limit is not None else _DEFAULT_ROW_LIMIT
+    hidden: tuple[str, ...] = ()
+    if has_inserted_at is not None and not (intent.full or intent.raw):
+        projection += f", {lag_expression(has_inserted_at)}"
+        hidden = (LAG_COLUMN,)
+    if not (intent.full or intent.raw):
+        suffix, aliases = _hidden_projection(intent)
+        projection += suffix
+        hidden += aliases
 
     # projection/sort come from COLUMN_MAP/SORT_ALIASES dict lookups, clauses
     # bind every user value as a parameter -- no raw user text reaches this f-string.
@@ -111,16 +140,24 @@ def build_logs(intent: LogsIntent, table: str) -> SqlStatement:
     if intent.full or intent.raw:
         meta["nested_output"] = True
     else:
-        meta["column_names"] = validate_columns(intent.columns or DEFAULT_LOG_COLS)
+        meta["column_names"] = _narrow_meta(intent, *hidden)
         params["tz"] = intent.tz
     return SqlStatement(sql=sql, params=params, meta=meta)
 
 
-_FOLLOW_BATCH_LIMIT = 5000
+FOLLOW_BATCH_LIMIT = 5000
 CURSOR_COLUMN = "__cursor_ts"
+ARRIVAL_CURSOR_COLUMN = "__cursor_ins"
+# A second is read only once it is this far behind the server clock, so an
+# insert still landing in it cannot be skipped by the cursor.
+ARRIVAL_SETTLE_S = 2
+# Partition pruning for the arrival poll: late rows older than this are missed.
+ARRIVAL_MAX_AGE_DAYS = 1
 
 
-def build_logs_since(intent: LogsIntent, table: str, since: str) -> SqlStatement:
+def build_logs_since(
+    intent: LogsIntent, table: str, since: str, has_inserted_at: bool | None = None
+) -> SqlStatement:
     """Poll variant of :func:`build_logs`: rows strictly after ``since``, oldest first.
 
     ``since`` and :data:`CURSOR_COLUMN` are full-precision strings.
@@ -134,6 +171,14 @@ def build_logs_since(intent: LogsIntent, table: str, since: str) -> SqlStatement
     params.update(since_pred.params)
 
     projection = _projection(intent.columns, intent.full, intent.raw)
+    hidden: tuple[str, ...] = (CURSOR_COLUMN,)
+    if has_inserted_at is not None and not (intent.full or intent.raw):
+        projection += f", {lag_expression(has_inserted_at)}"
+        hidden = (LAG_COLUMN, CURSOR_COLUMN)
+    if not (intent.full or intent.raw):
+        suffix, aliases = _hidden_projection(intent)
+        projection += suffix
+        hidden = (*hidden[:-1], *aliases, CURSOR_COLUMN)
     projection += f", toString(Timestamp) AS {CURSOR_COLUMN}"
 
     # projection/clauses bind every user value as a parameter or come from
@@ -142,16 +187,64 @@ def build_logs_since(intent: LogsIntent, table: str, since: str) -> SqlStatement
         f"SELECT {projection} FROM {table}{_where_clause(clauses)} "  # noqa: S608
         f"ORDER BY Timestamp ASC LIMIT %(limit)s"
     )
-    params["limit"] = _FOLLOW_BATCH_LIMIT
+    params["limit"] = FOLLOW_BATCH_LIMIT
     if intent.full or intent.raw:
         meta["nested_output"] = True
     else:
-        meta["column_names"] = (
-            *validate_columns(intent.columns or DEFAULT_LOG_COLS),
-            CURSOR_COLUMN,
-        )
+        meta["column_names"] = _narrow_meta(intent, *hidden)
         params["tz"] = intent.tz
     return SqlStatement(sql=sql, params=params, meta=meta)
+
+
+def build_logs_since_arrival(
+    intent: LogsIntent, table: str, since: tuple[str, str]
+) -> SqlStatement:
+    """Arrival-order poll: rows inserted after ``since`` in settled seconds.
+
+    ``since`` is ``(InsertedAt, Timestamp)`` as strings. Seconds younger
+    than :data:`ARRIVAL_SETTLE_S` are left for the next poll.
+    """
+    static_filters = replace(intent.filters, time_range=None)
+    clauses, params, meta = _assemble_predicates(static_filters)
+    clauses.append(
+        "(InsertedAt, Timestamp) > (toDateTime(%(since_ins)s), toDateTime64(%(since_ts)s, 9))"
+    )
+    clauses.append(f"InsertedAt < now() - INTERVAL {ARRIVAL_SETTLE_S} SECOND")
+    clauses.append(f"toDate(Timestamp) >= today() - {ARRIVAL_MAX_AGE_DAYS}")
+    params["since_ins"], params["since_ts"] = since
+
+    projection = _projection(intent.columns, intent.full, intent.raw)
+    hidden: tuple[str, ...] = (ARRIVAL_CURSOR_COLUMN, CURSOR_COLUMN)
+    if not (intent.full or intent.raw):
+        suffix, aliases = _hidden_projection(intent)
+        projection += f", {lag_expression(True)}{suffix}"
+        hidden = (LAG_COLUMN, *aliases, *hidden)
+    projection += (
+        f", toString(InsertedAt) AS {ARRIVAL_CURSOR_COLUMN}, toString(Timestamp) AS {CURSOR_COLUMN}"
+    )
+
+    # projection/clauses bind every user value as a parameter or come from
+    # dict lookups -- no raw user text reaches this f-string.
+    sql = (
+        f"SELECT {projection} FROM {table}{_where_clause(clauses)} "  # noqa: S608
+        f"ORDER BY InsertedAt ASC, Timestamp ASC LIMIT %(limit)s"
+    )
+    params["limit"] = FOLLOW_BATCH_LIMIT
+    if intent.full or intent.raw:
+        meta["nested_output"] = True
+    else:
+        meta["column_names"] = _narrow_meta(intent, *hidden)
+        params["tz"] = intent.tz
+    return SqlStatement(sql=sql, params=params, meta=meta)
+
+
+def build_arrival_start_cursor() -> SqlStatement:
+    """Server-side start for arrival follow: the newest second not yet settled."""
+    sql = (
+        f"SELECT toString(now() - INTERVAL {ARRIVAL_SETTLE_S} SECOND) AS ins, "
+        "'1970-01-01 00:00:00.000000000' AS ts"
+    )
+    return SqlStatement(sql=sql)
 
 
 def build_initial_cursor(window: str) -> SqlStatement:
@@ -225,9 +318,7 @@ def build_metrics_facet(intent: FacetIntent, table: str) -> SqlStatement:
         name for name in _METRICS_UNSUPPORTED_FILTERS if getattr(intent.filters, name) is not None
     ]
     if unsupported:
-        raise ConfigError(
-            f"--stream metrics does not support: {', '.join(unsupported)}"
-        )
+        raise ConfigError(f"--stream metrics does not support: {', '.join(unsupported)}")
     group_col = _METRICS_FACET_COLUMNS[intent.facet_field]
     clauses: list[str] = []
     params: dict[str, object] = {}
@@ -251,7 +342,9 @@ def build_metrics_facet(intent: FacetIntent, table: str) -> SqlStatement:
 
 _DEFAULT_METRIC_VALUES_LIMIT = 1000
 METRIC_CURSOR_COLUMN = "__cursor_ts"
-_METRIC_VALUE_PROJECTION = "TimeUnix AS ts, HostName AS host, ServiceName AS service, MetricName AS metric, Value AS value"
+_METRIC_VALUE_PROJECTION = (
+    "TimeUnix AS ts, HostName AS host, ServiceName AS service, MetricName AS metric, Value AS value"
+)
 
 
 def _metric_clauses(
@@ -292,7 +385,9 @@ def _split_by_projection(split_by: tuple[str, ...]) -> tuple[str, str]:
     return select_extra, group_by
 
 
-def build_metric_status(query: MetricQuery, table: str, split_by: tuple[str, ...] = ()) -> SqlStatement:
+def build_metric_status(
+    query: MetricQuery, table: str, split_by: tuple[str, ...] = ()
+) -> SqlStatement:
     """Per-metric min/max/avg/stddev summary, one row per matched metric name.
 
     ``split_by`` (``"host"``, ``"service"``, or both) breaks each
@@ -336,7 +431,7 @@ def build_metric_values_since(query: MetricQuery, table: str, since: str) -> Sql
         f"SELECT {projection} FROM {table}"  # noqa: S608
         f"{_where_clause(clauses)} ORDER BY TimeUnix ASC LIMIT %(limit)s"
     )
-    params["limit"] = _FOLLOW_BATCH_LIMIT
+    params["limit"] = FOLLOW_BATCH_LIMIT
     return SqlStatement(sql=sql, params=params)
 
 
@@ -389,10 +484,10 @@ def build_list(intent: ListIntent) -> SqlStatement:
 def build_lift(intent: LiftIntent) -> SqlStatement:
     table = validate_table(intent.table)
     database, _, table_name = table.partition(".")
-    sql = "SELECT name, type FROM system.columns WHERE database = %(database)s AND table = %(table)s"
-    return SqlStatement(
-        sql=sql, params={"database": database, "table": table_name}, meta={}
+    sql = (
+        "SELECT name, type FROM system.columns WHERE database = %(database)s AND table = %(table)s"
     )
+    return SqlStatement(sql=sql, params={"database": database, "table": table_name}, meta={})
 
 
 def build_tables_list(database: str) -> SqlStatement:

@@ -55,9 +55,7 @@ def level_predicate(level: str, pname: str = "level") -> Predicate:
     if level not in _SEVERITY_LADDER:
         accepted = ", ".join(_SEVERITY_LADDER)
         raise ConfigError(f"unknown level '{level}'; accepted: {accepted}")
-    return Predicate(
-        sql=f"SeverityNumber >= %({pname})s", params={pname: _SEVERITY_LADDER[level]}
-    )
+    return Predicate(sql=f"SeverityNumber >= %({pname})s", params={pname: _SEVERITY_LADDER[level]})
 
 
 def metric_name_predicate(name: str, pname: str = "name") -> Predicate:
@@ -70,14 +68,22 @@ def since_predicate(cursor: object, pname: str = "since", column: str = "Timesta
     return Predicate(sql=f"{column} > %({pname})s", params={pname: cursor})
 
 
-def time_predicate(window: str, pname: str = "tr", column: str = "Timestamp") -> Predicate:
-    """Timestamp predicate plus its toDate partition-pruning companion."""
+def time_predicate(
+    window: str, pname: str = "tr", column: str = "Timestamp", upper_bound: bool = True
+) -> Predicate:
+    """Timestamp window plus its toDate partition-pruning companion.
+
+    ``upper_bound`` caps the window at ``now()``; a source with a bad
+    clock otherwise fills every newest-first view with future rows.
+    """
     count, unit = parse_time_range(window)
     count_param = f"{pname}_count"
     sql = (
         f"{column} >= now() - INTERVAL %({count_param})s {unit} "
         f"AND toDate({column}) >= toDate(now() - INTERVAL %({count_param})s {unit})"
     )
+    if upper_bound:
+        sql += f" AND {column} <= now()"
     return Predicate(sql=sql, params={count_param: count})
 
 

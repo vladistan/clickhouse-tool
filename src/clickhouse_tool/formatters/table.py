@@ -14,6 +14,7 @@ from typing import ClassVar
 
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from clickhouse_tool.core.humanize import humanize_number
 from clickhouse_tool.core.logging import get_logger
@@ -122,25 +123,33 @@ class TableFormatter:
 
     def format(self, rows: RowSet) -> Iterator[str]:
         if not rows.columns:
-            get_logger(__name__).info(
-                "zero-column result", row_count=rows.row_count
-            )
+            get_logger(__name__).info("zero-column result", row_count=rows.row_count)
             return
 
         names = [column.name for column in rows.columns]
         if self._follow and self._column_widths is None:
             terminal_width = shutil.get_terminal_size(fallback=(_DEFAULT_WIDTH, 24)).columns
             self._column_widths = _fixed_column_widths(
-                names, rows.rows, terminal_width, self._decimals, self._ts_decimals, self._ts_precision
+                names,
+                rows.rows,
+                terminal_width,
+                self._decimals,
+                self._ts_decimals,
+                self._ts_precision,
             )
 
         table = Table(show_header=not self._follow, show_edge=not self._follow)
         for name in names:
             width = self._column_widths.get(name) if self._column_widths else None
-            table.add_column(name, width=width, overflow="ellipsis" if width else "fold")
+            table.add_column(Text(name), width=width, overflow="ellipsis" if width else "fold")
         for row in rows.rows:
+            # Text, not str: rich parses a bare str as markup, so a log line
+            # holding "[/x]" raises and one holding "[red]" loses text.
             table.add_row(
-                *(_render_cell(value, self._decimals, self._ts_decimals, self._ts_precision) for value in row)
+                *(
+                    Text(_render_cell(value, self._decimals, self._ts_decimals, self._ts_precision))
+                    for value in row
+                )
             )
 
         console_width = (

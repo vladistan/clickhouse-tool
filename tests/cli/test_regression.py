@@ -37,7 +37,9 @@ def test_format_flag_wins_over_the_profile_default(monkeypatch: pytest.MonkeyPat
 
     captured: dict[str, object] = {}
     monkeypatch.setattr(
-        listing_module.wiring, "load_profile", lambda _p, **_k: ResolvedProfile(default_format="toon")
+        listing_module.wiring,
+        "load_profile",
+        lambda _p, **_k: ResolvedProfile(default_format="toon"),
     )
     monkeypatch.setattr(listing_module.wiring, "open_client", lambda _p: object())
 
@@ -50,12 +52,16 @@ def test_format_flag_wins_over_the_profile_default(monkeypatch: pytest.MonkeyPat
     assert type(captured["formatter"]).__name__ == "JsonFormatter"
 
 
-def test_format_flag_falls_back_to_profile_default_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_format_flag_falls_back_to_profile_default_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import clickhouse_tool.cli.commands.listing as listing_module
 
     captured: dict[str, object] = {}
     monkeypatch.setattr(
-        listing_module.wiring, "load_profile", lambda _p, **_k: ResolvedProfile(default_format="table")
+        listing_module.wiring,
+        "load_profile",
+        lambda _p, **_k: ResolvedProfile(default_format="table"),
     )
     monkeypatch.setattr(listing_module.wiring, "open_client", lambda _p: object())
 
@@ -82,8 +88,11 @@ def test_time_range_flag_wins_over_profile_window(monkeypatch: pytest.MonkeyPatc
     )
     monkeypatch.setattr(logs_module.wiring, "open_client", lambda _p: object())
     monkeypatch.setattr(logs_module.wiring, "resolve_logs_table", lambda _p: "otel.otel_logs")
+    monkeypatch.setattr(logs_module, "probe_columns", lambda _c, _t: frozenset())
 
-    def _fake_run(_client: object, statement: SqlStatement, _formatter: object, **_kw: object) -> None:
+    def _fake_run(
+        _client: object, statement: SqlStatement, _formatter: object, **_kw: object
+    ) -> None:
         captured["statement"] = statement
 
     monkeypatch.setattr(logs_module, "run_statement", _fake_run)
@@ -108,7 +117,7 @@ def test_no_secret_reaches_stdout_or_stderr_on_success(
 ) -> None:
     import clickhouse_tool.cli.commands.config as config_module
 
-    secret = "s3cret-value-12345"  # pragma: allowlist secret
+    secret = "s3cret-value-12345"  # pragma: allowlist secret # noqa: S105
     resolved = ResolvedProfile(password=secret)
     monkeypatch.setattr(config_module.wiring, "load_profile", lambda _p, **_k: resolved)
     result = runner.invoke(app, ["config"])
@@ -119,7 +128,7 @@ def test_no_secret_reaches_stdout_or_stderr_on_success(
 def test_no_secret_reaches_stdout_or_stderr_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     import clickhouse_tool.cli.main as main_module
 
-    secret = "s3cret-value-12345"  # pragma: allowlist secret
+    secret = "s3cret-value-12345"  # pragma: allowlist secret # noqa: S105
 
     def _boom() -> None:
         raise RuntimeError(f"connection failed, password={secret}")
@@ -218,7 +227,9 @@ def test_statement_through_a_mocked_client_and_formatter_to_stdout(
                 row_count=1,
             )
 
-        def stream(self, _statement: SqlStatement) -> Iterator[tuple[object, ...]]:  # pragma: no cover
+        def stream(
+            self, _statement: SqlStatement
+        ) -> Iterator[tuple[object, ...]]:  # pragma: no cover
             raise AssertionError("not used by this test")
 
         def close(self) -> None:

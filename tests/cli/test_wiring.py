@@ -43,13 +43,15 @@ def test_open_client_unwraps_literal_credential(monkeypatch: pytest.MonkeyPatch)
     import clickhouse_tool.cli.wiring as wiring_module
 
     captured: dict[str, object] = {}
-    monkeypatch.setattr(wiring_module, "make_client", lambda params: captured.setdefault("params", params))
+    monkeypatch.setattr(
+        wiring_module, "make_client", lambda params: captured.setdefault("params", params)
+    )
     profile = ResolvedProfile(user="alice", password="secret", transport="native")  # noqa: S106
     open_client(profile)
     params = captured["params"]
     assert isinstance(params, ConnectionParams)
     assert params.user == "alice"
-    assert params.password == "secret"  # pragma: allowlist secret
+    assert params.password == "secret"  # pragma: allowlist secret # noqa: S105
 
 
 def test_unwrap_credential_raises_on_reference_that_survived_materialisation() -> None:
@@ -57,11 +59,15 @@ def test_unwrap_credential_raises_on_reference_that_survived_materialisation() -
         _unwrap_credential(SsmRef(ssm="/x/y"), "user")
 
 
-def test_open_client_defaults_absent_credentials_to_empty_string(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_open_client_defaults_absent_credentials_to_empty_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import clickhouse_tool.cli.wiring as wiring_module
 
     captured: dict[str, object] = {}
-    monkeypatch.setattr(wiring_module, "make_client", lambda params: captured.setdefault("params", params))
+    monkeypatch.setattr(
+        wiring_module, "make_client", lambda params: captured.setdefault("params", params)
+    )
     profile = ResolvedProfile(transport="native")
     open_client(profile)
     params = captured["params"]

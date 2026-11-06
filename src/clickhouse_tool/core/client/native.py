@@ -29,9 +29,7 @@ def _escape_literal_percent_signs(sql: str, params: dict[str, Any]) -> str:
     literal ``%`` needs ``%%`` or the substitution raises.
     """
     placeholder_re = re.compile(
-        "%(" + "|".join(re.escape(f"({name})s") for name in params) + ")"
-        if params
-        else "(?!)"
+        "%(" + "|".join(re.escape(f"({name})s") for name in params) + ")" if params else "(?!)"
     )
     parts = []
     last_end = 0
@@ -102,7 +100,7 @@ class NativeChClient:
         sql = _escape_literal_percent_signs(statement.sql, statement.params)
         try:
             rows, columns = self._client.execute(
-                sql, statement.params, with_column_types=True
+                sql, statement.params, with_column_types=True, settings=statement.settings or None
             )
         except Exception as exc:
             raise translate_native_error(exc) from exc
@@ -113,7 +111,7 @@ class NativeChClient:
     def stream(self, statement: SqlStatement) -> Iterator[tuple[Any, ...]]:
         sql = _escape_literal_percent_signs(statement.sql, statement.params)
         iterator = self._client.execute_iter(
-            sql, statement.params, with_column_types=True
+            sql, statement.params, with_column_types=True, settings=statement.settings or None
         )
         try:
             try:

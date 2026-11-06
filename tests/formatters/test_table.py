@@ -1,5 +1,7 @@
 """Tests for the table formatter."""
 
+# cspell:ignore kubelet
+
 from datetime import datetime
 
 import pytest
@@ -33,12 +35,16 @@ def test_timestamp_defaults_to_whole_seconds():
 
 
 def test_timestamp_ts_decimals_adds_a_fraction():
-    assert _render_cell(datetime(2026, 1, 1, 12, 30, 45, 123456), ts_decimals=3) == "2026-01-01 12:30:45.123"
+    assert (
+        _render_cell(datetime(2026, 1, 1, 12, 30, 45, 123456), ts_decimals=3)
+        == "2026-01-01 12:30:45.123"
+    )
 
 
 def test_timestamp_minute_precision_drops_seconds():
     assert (
-        _render_cell(datetime(2026, 1, 1, 12, 30, 45, 123456), ts_precision="m") == "2026-01-01 12:30"
+        _render_cell(datetime(2026, 1, 1, 12, 30, 45, 123456), ts_precision="m")
+        == "2026-01-01 12:30"
     )
 
 
@@ -102,7 +108,9 @@ def test_measure_natural_widths_floors_at_the_minimum():
 
 
 def test_fixed_column_widths_keeps_columns_distinct_not_evenly_split():
-    widths = _fixed_column_widths(["level", "msg"], [("info", "a fairly long message")], total_width=200)
+    widths = _fixed_column_widths(
+        ["level", "msg"], [("info", "a fairly long message")], total_width=200
+    )
     assert widths["level"] < widths["msg"]
 
 
@@ -153,3 +161,25 @@ def test_follow_mode_freezes_column_widths_across_batches(make_rowset):
     second = make_rowset(["msg"], [("a much, much longer message than before",)])
     list(formatter.format(second))
     assert formatter._column_widths == frozen
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "mount [/var/lib/kubelet   /] failed",
+        "level [bold]loud[/bold] text",
+        "nested [[a][/b]] and [red]",
+    ],
+    ids=["stray-closing-tag", "valid-looking-tag-pair", "nested-brackets"],
+)
+@pytest.mark.parametrize("follow", [False, True], ids=["plain", "follow"])
+def test_bracketed_cell_text_prints_verbatim(make_rowset, message, follow):
+    rows = make_rowset(["msg"], [(message,)])
+    output = "\n".join(TableFormatter(follow=follow).format(rows))
+    assert message in output
+
+
+def test_bracketed_column_name_prints_verbatim(make_rowset):
+    rows = make_rowset(["count[/x]"], [(1,)])
+    output = "\n".join(TableFormatter().format(rows))
+    assert "count[/x]" in output

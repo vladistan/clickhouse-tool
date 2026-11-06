@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "clickhouse-tool"
-version = "0.1.1"
+dynamic = ["version"]
 description = "ClickHouse query and administration CLI tool for the OTel logs/metrics pilot"
 readme = "README.md"
 authors = [
@@ -67,6 +67,9 @@ omit = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/clickhouse_tool"]
 
+[tool.hatch.version]
+path = "src/clickhouse_tool/__about__.py"
+
 [tool.mypy]
 python_version = "3.11"
 plugins = ["pydantic.mypy"]
@@ -81,10 +84,6 @@ warn_unused_ignores = true
 warn_unreachable = true
 strict_equality = true
 exclude = ["tests/"]
-
-[[tool.mypy.overrides]]
-module = "tests.*"
-disallow_untyped_defs = false
 
 [[tool.mypy.overrides]]
 module = ["clickhouse_driver.*", "clickhouse_connect.*"]

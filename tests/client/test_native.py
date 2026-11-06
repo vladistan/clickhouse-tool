@@ -1,5 +1,7 @@
 """Tests for NativeChClient."""
 
+# cspell:ignore uncoded
+
 from __future__ import annotations
 
 import sys
@@ -21,7 +23,7 @@ class FakeDriverClient:
         self.executed: list[str] = []
         self.executed_iter: list[str] = []
 
-    def execute(self, sql, params=None, with_column_types=False):
+    def execute(self, sql, params=None, with_column_types=False, settings=None):
         self.executed.append(sql)
         if sql == "RAISE_CODED":
             from clickhouse_driver.errors import ServerException
@@ -90,7 +92,7 @@ def fake_client(monkeypatch) -> FakeDriverClient:
         port=9000,
         database="otel",
         user="ch_tool",
-        password="secret",  # noqa: S106 - test fixture value, never a real credential
+        password="secret",  # noqa: S106 - test fixture value  # pragma: allowlist secret
     )
     return holder["client"]
 
@@ -210,7 +212,7 @@ def test_configured_query_timeout_reaches_driver_settings(monkeypatch) -> None:
         port=9000,
         database="otel",
         user="ch_tool",
-        password="secret",  # noqa: S106 - test fixture value, never a real credential
+        password="secret",  # noqa: S106 - test fixture value  # pragma: allowlist secret
         query_timeout=45.0,
     )
     assert holder["client"].kwargs["settings"] == {"readonly": 2, "max_execution_time": 45.0}

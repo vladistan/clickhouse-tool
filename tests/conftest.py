@@ -64,3 +64,13 @@ def make_rowset(columns: list[str], rows: list[tuple[object, ...]]) -> RowSet:
 @pytest.fixture
 def fake_client() -> FakeChClient:
     return FakeChClient()
+
+
+@pytest.fixture(autouse=True)
+def _sentry_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the suite from reporting to the real Sentry project.
+
+    ``run()`` reports unexpected crashes; tests that provoke one would
+    otherwise send it to the built-in DSN.
+    """
+    monkeypatch.setenv("CLICKHOUSE_TOOL_SENTRY_DSN", "")

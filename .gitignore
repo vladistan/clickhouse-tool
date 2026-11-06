@@ -5,3 +5,6 @@ htmlcov/
 __pycache__/
 *.pyc
 .venv/
+dist/
+.mypy_cache/
+.ruff_cache/

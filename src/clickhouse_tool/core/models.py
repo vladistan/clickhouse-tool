@@ -37,13 +37,15 @@ class RowSet:
 class SqlStatement:
     """Parameterized statement ready for backend execution.
 
-    ``sql`` and ``params`` form the executable pair. ``meta`` carries
-    search hints for ``--verbose`` reporting. Never affects equality.
+    ``sql`` and ``params`` form the executable pair. ``settings`` are
+    per-query ClickHouse settings. ``meta`` carries search hints for
+    ``--verbose`` reporting and never affects equality.
     """
 
     sql: str
     params: dict[str, Any] = field(default_factory=dict)
     meta: dict[str, Any] = field(default_factory=dict, compare=False)
+    settings: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

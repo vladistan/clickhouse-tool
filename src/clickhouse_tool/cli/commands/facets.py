@@ -24,9 +24,11 @@ def _humanize_last_seen(rows: RowSet) -> RowSet:
     idx = next(i for i, col in enumerate(rows.columns) if col.name == "last_seen")
     now = datetime.now(UTC)
     new_rows = tuple(
-        row[:idx] + (format_relative_time(row[idx], now=now),) + row[idx + 1 :] for row in rows.rows
+        (*row[:idx], format_relative_time(row[idx], now=now), *row[idx + 1 :]) for row in rows.rows
     )
-    return RowSet(columns=rows.columns, rows=new_rows, row_count=rows.row_count, truncated=rows.truncated)
+    return RowSet(
+        columns=rows.columns, rows=new_rows, row_count=rows.row_count, truncated=rows.truncated
+    )
 
 
 def _facet(

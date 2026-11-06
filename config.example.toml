@@ -4,28 +4,41 @@
 # ~/.config/clickhouse-tool/config.toml (user-level). Project-local wins
 # on any field present in both.
 
-default_profile = "pilot"      # never "default"
-default_format  = "toon"
-default_window  = "2h"
-default_timezone = "local"     # "local", "UTC", or any IANA zone name
+default_profile = "pilot" # never "default"
+default_format = "toon"
+default_window = "2h"
+default_timezone = "local" # "local", "UTC", or any IANA zone name
+late_after_s = 124 # flag a row inserted this many seconds after its event time
+future_after_s = 5 # flag a row stamped this many seconds ahead of its insert time
+aws_profile = "default" # optional default AWS profile for SSM lookups; AWS_PROFILE in the env wins
+aws_region = "us-east-1" # optional default AWS region for SSM lookups; AWS_REGION in the env wins
+sentry_dsn = "https://2931aea481d7dee6cfec6081784dd77c@o4508594232426496.ingest.us.sentry.io/4512104538832896" # optional; this is the built-in default, "" disables  # pragma: allowlist secret  # gitleaks:allow
+
+[layout.widths] # columns of the one-line `logs -f table` layout, in terminal cells
+host = 16
+source = 14
+service = 18
 
 [profiles.pilot]
-host      = "your-clickhouse-host.example.com"
-port      = 9000
-transport = "native"           # "native" | "http", both implemented
-database  = "otel"
-secure    = false
+host = "clickhouse.example.com"
+port = 9000
+aws_profile = "my-aws-profile" # AWS profile for this profile's SSM lookups
+aws_region = "us-east-1" # AWS region for this profile's SSM lookups
+transport = "native" # "native" | "http", both implemented
+database = "otel"
+secure = false
 logs_table = "otel_logs"
 connect_timeout = 10
-query_timeout   = 60
+query_timeout = 60
+
+[profiles.pilot.password]
+ssm = "/example/clickhouse/password"
 
 [profiles.pilot.user]
-ssm = "/clickhouse/v1/pilot/tool/username"
-[profiles.pilot.password]
-ssm = "/clickhouse/v1/pilot/tool/password"
+ssm = "/example/clickhouse/username"
 
-[profiles.pilot-http]           # HTTP-transport variant of the same pilot
-host = "your-clickhouse-host.example.com"
+[profiles.pilot-http] # HTTP-transport variant of the same pilot
+host = "clickhouse.example.com"
 port = 8123
 transport = "http"
 database = "otel"
@@ -34,7 +47,8 @@ logs_table = "otel_logs"
 connect_timeout = 10
 query_timeout = 60
 
-[profiles.pilot-http.user]
-ssm = "/clickhouse/v1/pilot/tool/username"
 [profiles.pilot-http.password]
-ssm = "/clickhouse/v1/pilot/tool/password"
+ssm = "/example/clickhouse/password"
+
+[profiles.pilot-http.user]
+ssm = "/example/clickhouse/username"

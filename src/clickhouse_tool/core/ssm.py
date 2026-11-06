@@ -7,12 +7,49 @@ fetched values and raises, naming every failed field.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 from pydantic import SecretStr
 
-from clickhouse_tool.core.config import ResolvedProfile, SsmRef
+from clickhouse_tool.core.config import AWS_DEFAULT_CHAIN, ResolvedProfile, SsmRef
 from clickhouse_tool.core.errors import ConfigError
 
 _SECRET_FIELDS = ("user", "password")
+_HINT = (
+    "Set aws_profile and aws_region on the SSM reference, the connection profile, "
+    "or the config top level; AWS_PROFILE and AWS_REGION in the environment win "
+    "over the config."
+)
+
+
+class AwsTarget(NamedTuple):
+    """The AWS profile and region one SSM lookup uses, each with its source."""
+
+    profile: str | None
+    profile_source: str
+    region: str | None
+    region_source: str
+
+    def describe(self) -> str:
+        return (
+            f"AWS profile {self.profile or AWS_DEFAULT_CHAIN} ({self.profile_source}), "
+            f"region {self.region or AWS_DEFAULT_CHAIN} ({self.region_source})"
+        )
+
+
+def aws_target(profile: ResolvedProfile, ref: SsmRef) -> AwsTarget:
+    """Combine the reference's own settings with the profile's resolved ones."""
+    aws_profile: str | None = ref.aws_profile
+    profile_source = "ssm reference"
+    if aws_profile is None:
+        aws_profile = profile.aws_profile
+        profile_source = profile.sources.get("aws_profile", AWS_DEFAULT_CHAIN)
+    region: str | None = ref.region
+    region_source = "ssm reference"
+    if region is None:
+        region = profile.aws_region
+        region_source = profile.sources.get("aws_region", AWS_DEFAULT_CHAIN)
+    return AwsTarget(aws_profile, profile_source, region, region_source)
 
 
 def materialise_secrets(profile: ResolvedProfile) -> ResolvedProfile:
@@ -33,16 +70,20 @@ def materialise_secrets(profile: ResolvedProfile) -> ResolvedProfile:
 
     resolved_values: dict[str, str] = {}
     failures: list[str] = []
-    client = _ssm_client()
+    clients: dict[tuple[str | None, str | None], object] = {}
 
     for field_name, ref in pending.items():
+        target = aws_target(profile, ref)
         try:
-            resolved_values[field_name] = _fetch(client, ref)
+            key = (target.profile, target.region)
+            if key not in clients:
+                clients[key] = _ssm_client(target.profile, target.region)
+            resolved_values[field_name] = _fetch(clients[key], ref)
         except Exception as exc:  # funneled into one typed ConfigError below
-            failures.append(f"{field_name} (ssm:{ref.ssm}): {exc}")
+            failures.append(describe_ssm_failure(field_name, ref, target, exc))
 
     if failures:
-        msg = "Failed to resolve secret(s) from SSM: " + "; ".join(failures)
+        msg = "Failed to resolve secret(s) from SSM: " + "; ".join(failures) + f". {_HINT}"
         raise ConfigError(msg)
 
     updates: dict[str, object] = {}
@@ -52,26 +93,21 @@ def materialise_secrets(profile: ResolvedProfile) -> ResolvedProfile:
     return profile.model_copy(update=updates)
 
 
-def _ssm_client() -> object:
+def describe_ssm_failure(field_name: str, ref: SsmRef, target: AwsTarget, exc: Exception) -> str:
+    """One failed field: parameter, AWS target with sources, and the AWS detail if any."""
+    detail = str(exc).strip().rstrip(":").strip()
+    text = f"{field_name} (ssm:{ref.ssm}) via {target.describe()}"
+    return f"{text}: {detail}" if detail else text
+
+
+def _ssm_client(aws_profile: str | None, aws_region: str | None) -> object:
     import boto3  # type: ignore[import-untyped]
 
-    return boto3.client("ssm")
+    session = boto3.Session(profile_name=aws_profile)
+    return session.client("ssm", region_name=aws_region)
 
 
 def _fetch(client: object, ref: SsmRef) -> str:
-    """Fetch and decrypt one SSM parameter, honoring per-ref profile/region overrides."""
-    target = client
-    if ref.aws_profile is not None or ref.region is not None:
-        import boto3
-
-        session_kwargs: dict[str, str] = {}
-        if ref.aws_profile is not None:
-            session_kwargs["profile_name"] = ref.aws_profile
-        session = boto3.Session(**session_kwargs)
-        client_kwargs: dict[str, str] = {}
-        if ref.region is not None:
-            client_kwargs["region_name"] = ref.region
-        target = session.client("ssm", **client_kwargs)
-
-    response = target.get_parameter(Name=ref.ssm, WithDecryption=True)  # type: ignore[attr-defined]
+    """Fetch and decrypt one SSM parameter."""
+    response = client.get_parameter(Name=ref.ssm, WithDecryption=True)  # type: ignore[attr-defined]
     return str(response["Parameter"]["Value"])

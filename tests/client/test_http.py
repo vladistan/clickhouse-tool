@@ -1,5 +1,7 @@
 """Tests for HttpChClient."""
 
+# cspell:ignore uncoded
+
 from __future__ import annotations
 
 import sys
@@ -49,7 +51,7 @@ class FakeConnectClient:
     def ping(self) -> bool:
         return True
 
-    def query(self, sql, parameters=None):
+    def query(self, sql, parameters=None, settings=None):
         if sql == "RAISE_CODED":
             from clickhouse_connect.driver.exceptions import DatabaseError
 
@@ -60,7 +62,7 @@ class FakeConnectClient:
             raise OperationalError("connection refused")
         return FakeQueryResult(["id", "name"], ["UInt32", "String"], [(1, "a"), (2, "b")])
 
-    def query_rows_stream(self, sql, parameters=None):
+    def query_rows_stream(self, sql, parameters=None, settings=None):
         if sql == "RAISE_ON_OPEN":
             from clickhouse_connect.driver.exceptions import OperationalError
 

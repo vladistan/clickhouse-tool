@@ -4,7 +4,6 @@ Precedence (high to low): CLI flag > env var > profile > config files > defaults
 Secret fields defer to :mod:`clickhouse_tool.core.ssm` for dereferencing.
 """
 
-
 from __future__ import annotations
 
 import os
@@ -12,7 +11,7 @@ import tomllib
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, SecretStr
+from pydantic import BaseModel, BeforeValidator, ConfigDict, SecretStr, model_validator
 
 from clickhouse_tool.core.errors import ConfigError
 
@@ -47,6 +46,15 @@ _OVERRIDABLE_FIELDS = (
 )
 
 
+AWS_DEFAULT_CHAIN = "boto3 default chain"
+
+# (field, env vars in priority order)
+_AWS_ENV: dict[str, tuple[str, ...]] = {
+    "aws_profile": ("AWS_PROFILE",),
+    "aws_region": ("AWS_REGION", "AWS_DEFAULT_REGION"),
+}
+
+
 class SsmRef(BaseModel):
     """A pointer at an AWS SSM parameter, in place of a literal secret value."""
 
@@ -55,6 +63,14 @@ class SsmRef(BaseModel):
     ssm: str
     aws_profile: str | None = None
     region: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_aws_region_alias(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "aws_region" in data:
+            data = dict(data)
+            data.setdefault("region", data.pop("aws_region"))
+        return data
 
 
 def _coerce_secret(value: Any) -> Any:
@@ -81,6 +97,26 @@ class Profile(BaseModel):
     logs_table: str = _DEFAULTS["logs_table"]
     connect_timeout: int = _DEFAULTS["connect_timeout"]
     query_timeout: int = _DEFAULTS["query_timeout"]
+    aws_profile: str | None = None
+    aws_region: str | None = None
+
+
+class LayoutWidths(BaseModel):
+    """Column widths, in terminal cells, for the one-line log layout."""
+
+    model_config = ConfigDict(frozen=True)
+
+    host: int = 16
+    source: int = 14
+    service: int = 18
+
+
+class LayoutConfig(BaseModel):
+    """``[layout]`` section of the TOML config."""
+
+    model_config = ConfigDict(frozen=True)
+
+    widths: LayoutWidths = LayoutWidths()
 
 
 class AppConfig(BaseModel):
@@ -92,6 +128,12 @@ class AppConfig(BaseModel):
     default_format: str = "toon"
     default_window: str = "2h"
     default_timezone: str = "local"
+    sentry_dsn: str | None = None
+    aws_profile: str | None = None
+    aws_region: str | None = None
+    late_after_s: int = 124
+    future_after_s: int = 5
+    layout: LayoutConfig = LayoutConfig()
     profiles: dict[str, Profile] = {}
 
 
@@ -116,6 +158,11 @@ class ResolvedProfile(BaseModel):
     default_format: str = "toon"
     default_window: str = "2h"
     default_timezone: str = "local"
+    late_after_s: int = 124
+    future_after_s: int = 5
+    layout: LayoutConfig = LayoutConfig()
+    aws_profile: str | None = None
+    aws_region: str | None = None
     active_profile: str | None = None
     sources: dict[str, str] = {}
 
@@ -216,6 +263,9 @@ def resolve_profile(
     resolved["default_format"] = config.default_format
     resolved["default_window"] = config.default_window
     resolved["default_timezone"] = config.default_timezone
+    resolved["late_after_s"] = config.late_after_s
+    resolved["future_after_s"] = config.future_after_s
+    resolved["layout"] = config.layout
     for key in resolved:
         sources[key] = "default"
 
@@ -244,6 +294,9 @@ def resolve_profile(
             resolved[field_name] = value
             sources[field_name] = f"cli: --{field_name}"
 
+    for key in _AWS_ENV:
+        resolved[key], sources[key] = resolve_aws_setting(key, config, effective_profile)
+
     resolved["active_profile"] = effective_profile
     resolved["sources"] = sources
     try:
@@ -251,6 +304,28 @@ def resolve_profile(
     except Exception as exc:
         msg = f"Invalid resolved configuration: {exc}"
         raise ConfigError(msg) from exc
+
+
+def resolve_aws_setting(
+    key: str, config: AppConfig, profile_name: str | None
+) -> tuple[str | None, str]:
+    """Pick ``aws_profile`` or ``aws_region``: env, then profile, then top level.
+
+    Returns the value and the level that supplied it. A value on the SSM
+    reference itself outranks all of these (see ``core.ssm``).
+    """
+    for env_var in _AWS_ENV[key]:
+        env_value = os.environ.get(env_var)
+        if env_value:
+            return env_value, f"env: {env_var}"
+    if profile_name is not None:
+        profile_value = getattr(config.profiles[profile_name], key)
+        if profile_value is not None:
+            return profile_value, f"profile: {profile_name}"
+    top_value = getattr(config, key)
+    if top_value is not None:
+        return top_value, "config"
+    return None, AWS_DEFAULT_CHAIN
 
 
 def _coerce_env_value(field_name: str, raw_value: str) -> Any:

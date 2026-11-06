@@ -5,8 +5,9 @@ Verb modules stay glue: no SQL text, no retry logic, no error tables.
 
 from __future__ import annotations
 
+import sys
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 
 from clickhouse_tool.core.client.base import ChClient
 from clickhouse_tool.core.errors import UnsupportedFilterError
@@ -14,9 +15,11 @@ from clickhouse_tool.core.models import ColumnMeta, RowSet, SqlStatement
 from clickhouse_tool.formatters import Formatter
 from clickhouse_tool.query.builder import (
     CURSOR_COLUMN,
+    FOLLOW_BATCH_LIMIT,
     METRIC_CURSOR_COLUMN,
     build_container_preflight,
     build_logs_since,
+    build_logs_since_arrival,
     build_metric_values_since,
 )
 from clickhouse_tool.query.intents import LogsIntent, MetricQuery
@@ -39,7 +42,10 @@ def run_statement(
         if statement.meta.get("container_preflight_required"):
             _run_container_preflight(client, statement, table)
         if formatter.streaming:
-            for line in formatter.format_stream(_stream_blocks(client, statement)):
+            blocks = _stream_blocks(client, statement)
+            if row_transform is not None:
+                blocks = map(row_transform, blocks)
+            for line in formatter.format_stream(blocks):
                 print(line)
         else:
             rows = client.execute(statement)
@@ -71,7 +77,9 @@ def _stream_blocks(client: ChClient, statement: SqlStatement) -> Iterator[RowSet
     """
     column_names = statement.meta.get("column_names")
     for row in client.stream(statement):
-        names = column_names if column_names is not None else tuple(f"col{i}" for i in range(len(row)))
+        names = (
+            column_names if column_names is not None else tuple(f"col{i}" for i in range(len(row)))
+        )
         columns = tuple(ColumnMeta(name=name, ch_type="") for name in names)
         yield RowSet(columns=columns, rows=(row,), row_count=1)
 
@@ -82,29 +90,66 @@ def run_follow(
     intent: LogsIntent,
     table: str,
     formatter: Formatter,
-    since: str,
+    since: str | tuple[str, str],
     poll_interval: float = 2.0,
+    arrival: bool = False,
+    has_inserted_at: bool | None = None,
+    row_transform: Callable[[RowSet], RowSet] | None = None,
 ) -> None:
-    """Poll for new rows after ``since`` and print each new batch as it arrives.
+    """Poll for rows after ``since`` and print each batch as it arrives.
 
-    Runs until interrupted; a caller's own funnel handles ``KeyboardInterrupt``.
-    Never buffers more than one poll's batch in memory.
+    ``arrival`` follows the ``(InsertedAt, Timestamp)`` cursor, else the
+    event-time ``Timestamp`` cursor. Runs until interrupted.
     """
+    cursor: tuple[str, ...] = (since,) if isinstance(since, str) else since
+
+    def build(at: tuple[str, ...]) -> SqlStatement:
+        if arrival:
+            return build_logs_since_arrival(intent, table, (at[0], at[1]))
+        return build_logs_since(intent, table, at[0], has_inserted_at)
+
     try:
-        cursor = since
-        statement = build_logs_since(intent, table, cursor)
+        statement = build(cursor)
         if statement.meta.get("container_preflight_required"):
             _run_container_preflight(client, statement, table)
         while True:
             rows = client.execute(statement)
             if rows.row_count:
-                cursor, visible = _advance_cursor(rows)
-                for line in formatter.format(visible):
-                    print(line)
-            time.sleep(poll_interval)
-            statement = build_logs_since(intent, table, cursor)
+                cursor, visible = _split_cursor(rows)
+                if row_transform is not None:
+                    visible = row_transform(visible)
+                _emit_batch(formatter.format(visible))
+            _sleep_when_caught_up(rows, poll_interval)
+            statement = build(cursor)
     finally:
         client.close()
+
+
+def _split_cursor(rows: RowSet) -> tuple[tuple[str, ...], RowSet]:
+    """Read every ``__cursor*`` column off the last row, then drop those columns."""
+    idx = [i for i, col in enumerate(rows.columns) if col.name.startswith("__cursor")]
+    # arrival cursor is (InsertedAt, Timestamp); the builders project them in that order
+    cursor = tuple(str(rows.rows[-1][i]) for i in idx)
+    keep = [i for i in range(len(rows.columns)) if i not in idx]
+    visible = RowSet(
+        columns=tuple(rows.columns[i] for i in keep),
+        rows=tuple(tuple(row[i] for i in keep) for row in rows.rows),
+        row_count=rows.row_count,
+    )
+    return cursor, visible
+
+
+def _emit_batch(lines: Iterable[str]) -> None:
+    """Print one poll's lines and flush, so a pipe reader sees them now."""
+    for line in lines:
+        print(line)
+    sys.stdout.flush()
+
+
+def _sleep_when_caught_up(rows: RowSet, poll_interval: float) -> None:
+    """A full batch means more rows are waiting: poll again at once."""
+    if rows.row_count < FOLLOW_BATCH_LIMIT:
+        time.sleep(poll_interval)
 
 
 def _advance_cursor(rows: RowSet, cursor_column: str = CURSOR_COLUMN) -> tuple[str, RowSet]:
@@ -133,9 +178,8 @@ def run_metric_follow(
             rows = client.execute(statement)
             if rows.row_count:
                 cursor, visible = _advance_cursor(rows, METRIC_CURSOR_COLUMN)
-                for line in formatter.format(visible):
-                    print(line)
-            time.sleep(poll_interval)
+                _emit_batch(formatter.format(visible))
+            _sleep_when_caught_up(rows, poll_interval)
             statement = build_metric_values_since(query, table, cursor)
     finally:
         client.close()

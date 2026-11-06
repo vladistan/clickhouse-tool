@@ -54,7 +54,9 @@ class HttpChClient:
 
     def execute(self, statement: SqlStatement) -> RowSet:
         try:
-            result = self._client.query(statement.sql, parameters=statement.params)
+            result = self._client.query(
+                statement.sql, parameters=statement.params, settings=statement.settings or None
+            )
         except Exception as exc:
             raise translate_http_error(exc) from exc
         col_meta = tuple(
@@ -66,7 +68,9 @@ class HttpChClient:
 
     def stream(self, statement: SqlStatement) -> Iterator[tuple[Any, ...]]:
         try:
-            ctx = self._client.query_rows_stream(statement.sql, parameters=statement.params)
+            ctx = self._client.query_rows_stream(
+                statement.sql, parameters=statement.params, settings=statement.settings or None
+            )
         except Exception as exc:
             raise translate_http_error(exc) from exc
         try:
